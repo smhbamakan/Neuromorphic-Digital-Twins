@@ -1,0 +1,6 @@
+python==3.13
+brian2==2.11.0
+numpy==2.5.3
+scipy==1.18.1
+matplotlib==3.11.2
+cython  # Brian2 code generation target; a C compiler is required
