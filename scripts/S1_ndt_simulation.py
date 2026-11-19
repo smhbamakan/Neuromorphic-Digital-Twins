@@ -1,5 +1,6 @@
 """
-S1 -- Minimal two-agent belief-tracking demonstration (Section 6.4), revision 3.
+S1 -- Two-agent belief-tracking experiment: proof-of-concept instantiation of the evaluation
+      protocol (Section 6.4; Tables 7-9 and Figure 3).
 
 Usage:   python S1_ndt_simulation.py <first_seed> <last_seed_exclusive> <out_dir>
 Example: python S1_ndt_simulation.py 0 10 results/sim
@@ -19,6 +20,9 @@ Models (identical degraded input stream, identical targets, identical data split
 All recurrent weights are fixed after initialisation; only the linear readout is fitted (ridge regression,
 first 40 s). Predictions in the held-out 20 s are produced with frozen readout weights; no online learning.
 
+Ablation 'NDT_nodelay' replaces the heterogeneous 1-15 ms synaptic delays by a uniform 1 ms delay;
+'NDT_norec' removes the recurrent synapses.
+
 Outputs per seed: seed_<s>.json (all metrics, operation counts, censoring info) and, for seed 0,
 traces_seed0.npz (held-out trajectories used in Figure 3a).
 """
@@ -34,15 +38,14 @@ prefs.codegen.target = 'cython'
 CFG = dict(
     T_total=60.0, T_train=40.0,   # s
     dt_sim=0.5,                   # ms, integration step of the spiking simulator
-    dt_eval=5.0,                  # ms, matched evaluation interval for the primary comparison
-    intervals=[0.5, 1.0, 2.0, 5.0, 10.0],   # ms, output-interval sensitivity analysis
+    dt_eval=5.0,                  # ms, common evaluation grid and rate-model frame period
     hazard=0.5, r_hi=40.0, r_lo=10.0,
     delay_ab=20.0, p_drop=0.0,
     drops=[0.0, 0.1, 0.2, 0.4],
     N=200, p_conn=0.10, g=1.6, tau_m=20.0, tau_d=50.0,
     d_min=1.0, d_max=15.0, w_in=1.30, I_mu=0.55, I_sd=0.10, t_ref=2.0,
     # rate baseline
-    rate_win=0.8, rate_rho=0.92, rate_win_grid=[0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8, 25.6], rate_tau=-5.0 / np.log(1 - 0.3),  # ms; equals leak 0.3 at a 5 ms frame
+    rate_win=0.8, rate_rho=0.92, rate_tau=-5.0 / np.log(1 - 0.3),  # ms; equals leak 0.3 at a 5 ms frame
     ridge=1e-3, p_clip=1e-4,
     eps0=0.10, T_hold=100.0, T_max_adapt=3.0,   # adaptation criterion, Eq. (20)
     ece_bins=10,
@@ -263,10 +266,6 @@ def on_grid(a, step):
     return a[::step]
 
 
-def zoh_to_fine(v, step, n):
-    return np.repeat(v, step)[:n]
-
-
 # ------------------------------------------------------------------ one seed
 def one_seed(seed, cfg, out_dir):
     rng = np.random.default_rng(seed)
@@ -308,48 +307,6 @@ def one_seed(seed, cfg, out_dir):
 
     # ---- Bayesian observer posterior
     res['BAYES'] = eval_on(se, on_grid(x_obs, se))
-
-    # ---- output-interval sensitivity: error evaluated continuously (zero-order hold on the 0.5 ms grid)
-    sens = {}
-    for itv in cfg['intervals']:
-        st = int(round(itv / cfg['dt_sim']))
-        ntr = n_tr_f // st
-        Wi = fit_ridge(on_grid(Rn, st), on_grid(task['x_full'], st), ntr, cfg)
-        pn = clip(zoh_to_fine(predict(on_grid(Rn, st), Wi), st, n), cfg)
-        y_i = on_grid(task['x_full'], st)
-        te = slice(n_tr_f, n)
-
-        def rate_pred(scale):
-            rri = run_rate(task, cfg, Win * scale / cfg['rate_win'], Wr, i0, i1, itv)
-            Wei = fit_ridge(rri['R'], y_i, ntr, cfg)
-            pe = clip(zoh_to_fine(predict(rri['R'], Wei), st, n), cfg)
-            pe = np.concatenate([pe, np.full(n - pe.size, pe[-1])]) if pe.size < n else pe
-            return rri, pe
-
-        rri, pe = rate_pred(cfg['rate_win'])              # fixed hyper-parameters (as tuned at 5 ms)
-        # input scale re-selected at this interval on a validation split inside the training window
-        # (readout fitted on 0-30 s, validated on 30-40 s); the held-out window is never used for selection
-        nv = int(round(30.0 / (itv * 1e-3)))
-        best, best_err = cfg['rate_win'], np.inf
-        for sc in cfg['rate_win_grid']:
-            r_ = run_rate(task, cfg, Win * sc / cfg['rate_win'], Wr, i0, i1, itv)
-            Wv = fit_ridge(r_['R'], y_i, nv, cfg)
-            pv = clip(predict(r_['R'][nv:ntr], Wv), cfg)
-            err = np.sqrt(np.mean((pv - y_i[nv:ntr]) ** 2))
-            if err < best_err:
-                best, best_err = sc, err
-        _, pt = rate_pred(best)
-        nf_test = (n - n_tr_f) // st
-        sens[str(itv)] = dict(
-            ndt_rmse=float(np.sqrt(np.mean((pn[te] - task['x_full'][te]) ** 2))),
-            rate_rmse=float(np.sqrt(np.mean((pe[te] - task['x_full'][te]) ** 2))),
-            rate_tuned_rmse=float(np.sqrt(np.mean((pt[te] - task['x_full'][te]) ** 2))),
-            rate_tuned_scale=float(best),
-            ndt_readout_macs=nf_test * (cfg['N'] + 1),
-            rate_frames=nf_test,
-            rate_macs_test=nf_test * (rri['nnz'] + 2 * cfg['N']),
-            rate_wall=rri['wall'])
-    res['interval_sensitivity'] = sens
 
     # ---- ablations (same task, same weights where applicable, readout refitted)
     for tag, kw in [('NDT_nodelay', dict(use_delays=False)), ('NDT_norec', dict(use_recurrence=False))]:
