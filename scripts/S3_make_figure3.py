@@ -73,7 +73,7 @@ ax.set_xscale('log'); ax.set_xlim(3e6, 4e7); ax.set_ylim(0.10, 0.25)
 ax.xaxis.set_minor_formatter(NullFormatter())
 ax.xaxis.set_major_locator(FixedLocator([5e6, 1e7, 2e7]))
 ax.set_xticklabels([r'$5\times10^{6}$', r'$10^{7}$', r'$2\times10^{7}$'])
-ax.set_xlabel('Primitive operations (held-out window)'); ax.set_ylabel('Belief RMSE')
+ax.set_xlabel('Primitive operations per trial'); ax.set_ylabel('Belief RMSE')
 ax.legend(frameon=False, fontsize=7.5, loc='lower left', handlelength=1.2)
 ax.set_title('(c) Accuracy vs. operation count', loc='left', fontsize=10.5)
 
@@ -83,7 +83,7 @@ keys = ['NDT', 'NDT_nodelay', 'NDT_norec']
 m = [S['table8'][k]['rmse_full'][0] for k in keys]; h = [S['table8'][k]['rmse_full'][1] for k in keys]
 ax.bar(range(3), m, yerr=h, color=[BLUE, LBLUE, LBLUE], edgecolor='black', lw=0.8, capsize=4, width=0.62,
        error_kw={'lw': 1.2})
-ax.set_xticks(range(3)); ax.set_xticklabels(['Full\nNDT', 'Uniform\ndelay', 'No\nrecurrence'], fontsize=8.5)
+ax.set_xticks(range(3)); ax.set_xticklabels(['Full\nNDT', 'No\ndelays', 'No\nrecurrence'], fontsize=8.5)
 ax.set_ylabel('Belief RMSE'); ax.set_ylim(0, 0.28)
 ax.set_title('(d) Mechanism ablations', loc='left', fontsize=10.5)
 

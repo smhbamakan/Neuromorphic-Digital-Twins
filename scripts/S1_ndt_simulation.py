@@ -9,8 +9,8 @@ Task (Section 6.3.7)
   z(t)        symmetric telegraph process in {-1,+1}, switching hazard h            (binary environmental state)
   events      two Poisson channels, rates r_hi / r_lo depending on z(t)
   x_full(t)   exact posterior P(z=+1 | all events up to t)  -- agent B's belief    (full-information reference)
-  x_obs(t)    exact posterior available to the observer, which receives the same events after a
-              20 ms delay and with i.i.d. losses                                    (observer-information bound)
+  x_obs(t)    Bayesian belief tracker: exact filter applied to the events received by the observer
+              (20 ms delay; i.i.d. losses in the robustness analysis)              (normative reference)
   Primary estimation target of every model: x_full(t).
 
 Models (identical degraded input stream, identical targets, identical data split, identical ridge readout)
@@ -48,7 +48,6 @@ CFG = dict(
     rate_win=0.8, rate_rho=0.92, rate_tau=-5.0 / np.log(1 - 0.3),  # ms; equals leak 0.3 at a 5 ms frame
     ridge=1e-3, p_clip=1e-4,
     eps0=0.10, T_hold=100.0, T_max_adapt=3.0,   # adaptation criterion, Eq. (20)
-    ece_bins=10,
 )
 
 
@@ -99,12 +98,11 @@ def degrade(task, cfg, rng, p_drop):
 
 
 def observer_posterior(task, cfg, i0, i1):
-    """Exact posterior given the delayed, lossy stream: filter the received events, then propagate the
-    belief forward over the transmission delay with the telegraph prior."""
+    """Continuous-time Bayesian belief tracker: the exact (Wonham-type) filter applied to the event
+    stream received by the observer, i.e. the posterior computable from the events received so far."""
     e0 = np.zeros(task['n'], bool); e0[i0] = True
     e1 = np.zeros(task['n'], bool); e1[i1] = True
-    p = posterior(e0, e1, cfg, task['dt'])
-    return 0.5 + (p - 0.5) * np.exp(-2 * cfg['hazard'] * cfg['delay_ab'] * 1e-3)
+    return posterior(e0, e1, cfg, task['dt'])
 
 
 # ------------------------------------------------------------------ NDT
@@ -154,7 +152,9 @@ def ndt_counts(nd, i0, i1, task, cfg, t_from, t_to):
     rec = int(nd['outdeg'][nd['spk_i'][m]].sum())                 # recurrent synaptic events (exact)
     n_in = int(sum(((idx * dt >= t_from) & (idx * dt < t_to)).sum() for idx in (i0, i1)))
     steps = int(round((t_to - t_from) / dt))
+    has_rec = nd['outdeg'].sum() > 0
     return dict(spikes=spikes, syn_rec=rec, syn_in=n_in * N, input_events=n_in,
+                syn_rec_meanfield=float(spikes * (N - 1) * cfg['p_conn']) if has_rec else 0.0,
                 neuron_updates=N * steps,      # clock-driven membrane updates
                 trace_updates=N * steps)       # clock-driven readout-trace updates
 
@@ -225,39 +225,22 @@ def adaptation(err, z, dt_s, cfg):
         else:
             times.append(hit)
     n = len(times) + cens
-    return dict(t_adapt_median=float(np.median(times)) if times else np.nan,
-                t_adapt_censored=float(np.median(times + [cfg['T_max_adapt']] * cens)) if n else np.nan,
+    return dict(t_adapt=float(np.median(times)) if times else np.nan,   # median over re-acquired switches
                 n_switch=n, n_censored=cens)
 
 
-def ece(p, y, bins):
-    edges = np.linspace(0, 1, bins + 1)
-    idx = np.clip(np.digitize(p, edges) - 1, 0, bins - 1)
-    e, curve = 0.0, []
-    for b in range(bins):
-        m = idx == b
-        if m.any():
-            e += m.mean() * abs(p[m].mean() - y[m].mean())
-            curve.append([float(p[m].mean()), float(y[m].mean()), int(m.sum())])
-        else:
-            curve.append([np.nan, np.nan, 0])
-    return float(e), curve
-
-
 def metrics(raw, x_full, x_obs, z, dt_s, cfg):
-    """All metrics on the held-out window. raw: readout output; targets on the same grid."""
+    """All metrics on the held-out window, computed against the reference posterior x_full(t).
+    raw: readout output; targets on the same grid."""
     p = clip(raw, cfg)
-    zb = (z > 0).astype(float)
-    eps = cfg['p_clip']
     out = dict(
-        rmse_full=float(np.sqrt(np.mean((p - x_full) ** 2))),          # posterior approximation
+        rmse_full=float(np.sqrt(np.mean((p - x_full) ** 2))),
         rmse_obs=float(np.sqrt(np.mean((p - x_obs) ** 2))),
-        brier=float(np.mean((p - zb) ** 2)),                          # against realised binary state
-        logloss=float(-np.mean(zb * np.log(p) + (1 - zb) * np.log(1 - p))),
-        accuracy=float(np.mean((p > 0.5) == (zb > 0.5))),             # against realised binary state
-        frac_clipped=float(np.mean((raw < eps) | (raw > 1 - eps))),
+        brier=float(np.mean((p - x_full) ** 2)),
+        logloss=float(-np.mean(x_full * np.log(p) + (1 - x_full) * np.log(1 - p))),
+        accuracy=float(np.mean((p > 0.5) == (x_full > 0.5))),
+        frac_clipped=float(np.mean((raw < cfg['p_clip']) | (raw > 1 - cfg['p_clip']))),
     )
-    out['ece'], out['reliability'] = ece(p, zb, cfg['ece_bins'])
     out.update(adaptation(np.abs(p - x_full), z, dt_s, cfg))
     return out
 

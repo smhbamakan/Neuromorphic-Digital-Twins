@@ -31,14 +31,21 @@ S2 documents the confidence intervals, paired tests and Holm–Bonferroni famili
 
 ## Conventions
 
-* Belief RMSE is computed against the reference posterior x_B*(t). Brier score, negative log-likelihood and
-  decision accuracy are computed against the realised binary state. All metrics use the held-out 20 s window
-  on a common 5 ms evaluation grid.
-* Operation counts in Table 7 refer to the held-out window. Executed counts include membrane, trace, synaptic
-  and readout operations. The projected event-driven count omits updates of inactive neurons; it is a
+* All predictive metrics use the held-out 20 s window on a common 5 ms evaluation grid and are computed
+  against the reference posterior x_B*(t): belief RMSE; Brier score (mean squared difference); negative
+  log-likelihood (cross-entropy with the reference as soft target); decision accuracy (agreement of the
+  thresholded estimate with the thresholded reference).
+* The Bayesian tracker is the exact filter applied to the event stream received by the observer
+  (20 ms delay; independent event losses in the robustness analysis).
+* Adaptation time follows Eq. (20) with eps0 = 0.1 and T_hold = 100 ms: the median over latent-state switches
+  re-acquired within 3 s. Switches not re-acquired (none for the full model and the baselines; 6 and 8 of 105
+  for the two ablations) are reported in `summary.json`.
+* Synaptic events (Tables 7 and 8) are counted over the full 60 s trial as spikes x expected recurrent
+  out-degree plus input events x N; `summary.json` also gives the exact count. Executed and projected primitive
+  operations (Table 7, Figure 3c) refer to the held-out window. Executed counts include membrane, trace,
+  synaptic and readout operations; the projected event-driven count omits updates of inactive neurons and is a
   projection, not a hardware measurement.
-* Ablation event counts in Table 8 refer to the full 60 s trial. The "uniform delay" ablation replaces the
-  heterogeneous 1–15 ms synaptic delays with a uniform 1 ms delay.
+* The "no delays" ablation replaces the heterogeneous 1–15 ms synaptic delays with a uniform 1 ms delay.
 
 ## Archive
 
