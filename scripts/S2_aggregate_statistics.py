@@ -1,6 +1,17 @@
 """
-S2 -- Aggregates seed-level results of S1 into the quantities reported in Tables 7-9 and the
-supplementary tables. Usage:  python S2_aggregate_statistics.py results/sim
+S2 -- Aggregates the seed-level results of S1 into the quantities reported in Tables 7-9 (Section 6.4).
+Usage:  python S2_aggregate_statistics.py results/sim
+
+Metric definitions (held-out 20 s window, common 5 ms evaluation grid), all against the reference
+posterior x_B*(t) (full-information Bayesian posterior):
+  * Belief RMSE; Brier score = mean squared difference; negative log-likelihood = cross-entropy with the
+    reference posterior as soft target; decision accuracy = agreement of the thresholded (0.5) estimate
+    with the thresholded reference.
+  * Adaptation time: Eq. (20) with eps0 = 0.1 and T_hold = 100 ms, median over the switches re-acquired
+    within 3 s; the number of switches not re-acquired is reported separately (S['switches']).
+  * Synaptic events (Tables 7 and 8, full 60 s trial): spikes x expected recurrent out-degree (N-1)p plus
+    input events x N. Rate-model MACs (Table 7, full trial): recurrent + input multiply-accumulates.
+  * Executed and projected primitive operations (Table 7, Figure 3c): held-out window.
 
 Statistical procedure
   * 95% confidence intervals: mean +/- t_{0.975, n-1} * SD / sqrt(n) across independent seeds.
@@ -17,8 +28,7 @@ D = sys.argv[1]
 R = [json.load(open(f)) for f in sorted(glob.glob(os.path.join(D, 'seed_*.json')),
                                         key=lambda s: int(s.split('_')[-1].split('.')[0]))]
 n = len(R)
-MET = ['rmse_full', 'rmse_obs', 'brier', 'logloss', 'ece', 'accuracy', 'frac_clipped',
-       't_adapt_median', 't_adapt_censored']
+MET = ['rmse_full', 'rmse_obs', 'brier', 'logloss', 'accuracy', 'frac_clipped', 't_adapt']
 
 
 def ci(v):
@@ -54,11 +64,10 @@ g = lambda m, k: [r[m][k] for r in R]
 
 # ---------------- Table 7: predictive quality
 S['table7'] = {m: {k: ci(g(m, k)) for k in MET} for m in ['NDT', 'RATE', 'BAYES']}
-S['switches'] = {m: dict(evaluated=int(sum(g(m, 'n_switch'))), censored=int(sum(g(m, 'n_censored'))))
+S['switches'] = {m: dict(evaluated=int(sum(g(m, 'n_switch'))), not_reacquired=int(sum(g(m, 'n_censored'))))
                  for m in ['NDT', 'RATE', 'BAYES', 'NDT_nodelay', 'NDT_norec']}
 S['tests_ndt_vs_rate'] = family({k: paired(g('NDT', k), g('RATE', k)) for k in
-                                 ['rmse_full', 'rmse_obs', 'brier', 'logloss', 'ece', 'accuracy',
-                                  't_adapt_censored']})
+                                 ['rmse_full', 'rmse_obs', 'brier', 'logloss', 'accuracy', 't_adapt']})
 S['rate_hz'] = ci(g('NDT', 'rate_hz'))
 
 # ---------------- operation accounting (held-out window and full trial)
@@ -78,13 +87,16 @@ for win in ['counts_test', 'counts_full']:
     rows['NDT_neuron_updates'] = ci(nd('neuron_updates'))
     rows['NDT_trace_updates'] = ci(nd('trace_updates'))
     rows['readout_macs'] = readout
+    syn = np.array(nd('syn_rec')) + np.array(nd('syn_in'))
     ex = np.array(nd('syn_rec')) + np.array(nd('syn_in')) + np.array(nd('neuron_updates')) \
         + np.array(nd('trace_updates')) + readout
     # event-driven projection: one state update per delivered synaptic event (exact integration between
     # events), one trace increment per spike, N trace evaluations per output sample, and the readout
     ev = np.array(nd('syn_rec')) + np.array(nd('syn_in')) + np.array(nd('spikes')) + frames * N + readout
     rows['NDT_trace_evaluations_event_driven'] = frames * N
-    syn = np.array(nd('syn_rec')) + np.array(nd('syn_in'))
+    rows['NDT_synaptic_events_exact'] = ci(syn)
+    rows['NDT_synaptic_events_meanfield'] = ci(np.array(nd('syn_rec_meanfield')) + np.array(nd('syn_in')))
+    rows['RATE_mac_recurrent_plus_input'] = ci(np.array(rt('mac_rec')) + np.array(rt('mac_in')))
     rows['NDT_total_executed'] = ci(ex)
     rows['NDT_total_event_driven_projection'] = ci(ev)
     rows['RATE_mac_recurrent'] = ci(rt('mac_rec'))
@@ -102,13 +114,14 @@ for win in ['counts_test', 'counts_full']:
 S['operations'] = acc
 
 # ---------------- Table 8: ablations
-S['table8'] = {m: {k: ci(g(m, k)) for k in ['rmse_full', 'brier', 'logloss', 't_adapt_censored']}
+S['table8'] = {m: {k: ci(g(m, k)) for k in ['rmse_full', 'brier', 'logloss', 't_adapt']}
                for m in ['NDT', 'NDT_nodelay', 'NDT_norec']}
 for m in ['NDT', 'NDT_nodelay', 'NDT_norec']:
     S['table8'][m]['spikes_full'] = ci([r[m]['counts_full']['spikes'] for r in R])
-    S['table8'][m]['syn_full'] = ci([r[m]['counts_full']['syn_rec'] + r[m]['counts_full']['syn_in'] for r in R])
+    S['table8'][m]['syn_full'] = ci([r[m]['counts_full']['syn_rec_meanfield'] + r[m]['counts_full']['syn_in'] for r in R])
+    S['table8'][m]['syn_full_exact'] = ci([r[m]['counts_full']['syn_rec'] + r[m]['counts_full']['syn_in'] for r in R])
 S['tests_ablation'] = family({f'{a}_{k}': paired(g(a, k), g('NDT', k))
-                              for a in ['NDT_nodelay', 'NDT_norec'] for k in ['rmse_full', 't_adapt_censored']})
+                              for a in ['NDT_nodelay', 'NDT_norec'] for k in ['rmse_full', 't_adapt']})
 
 # ---------------- Table 9: robustness
 drops = R[0]['cfg']['drops']
@@ -127,45 +140,49 @@ for p in drops[1:]:
 S['tests_robustness'] = family(tests)
 S['gap_rate_minus_ndt_by_level'] = {str(p): ci(np.array(rb('RATE', p)) - np.array(rb('NDT', p))) for p in drops}
 
-# ---------------- output-interval sensitivity
-iv = R[0]['cfg']['intervals']
-S['interval_sensitivity'] = {str(i): dict(
-    ndt_rmse=ci([r['interval_sensitivity'][str(i)]['ndt_rmse'] for r in R]),
-    rate_rmse=ci([r['interval_sensitivity'][str(i)]['rate_rmse'] for r in R]),
-    rate_tuned_rmse=ci([r['interval_sensitivity'][str(i)]['rate_tuned_rmse'] for r in R]),
-    rate_tuned_scales=[r['interval_sensitivity'][str(i)]['rate_tuned_scale'] for r in R],
-    paired_tuned=paired([r['interval_sensitivity'][str(i)]['ndt_rmse'] for r in R],
-                        [r['interval_sensitivity'][str(i)]['rate_tuned_rmse'] for r in R]),
-    rate_macs_test=ci([r['interval_sensitivity'][str(i)]['rate_macs_test'] for r in R]),
-    ndt_readout_macs=R[0]['interval_sensitivity'][str(i)]['ndt_readout_macs'],
-    rate_wall=ci([r['interval_sensitivity'][str(i)]['rate_wall'] for r in R]),
-    paired=paired([r['interval_sensitivity'][str(i)]['ndt_rmse'] for r in R],
-                  [r['interval_sensitivity'][str(i)]['rate_rmse'] for r in R])) for i in iv}
-family({i: S['interval_sensitivity'][i]['paired'] for i in S['interval_sensitivity']})
-family({i: S['interval_sensitivity'][i]['paired_tuned'] for i in S['interval_sensitivity']})
-
-# ---------------- reliability curves (pooled over seeds, held-out window)
-S['reliability'] = {m: [r[m]['reliability'] for r in R] for m in ['NDT', 'RATE', 'BAYES']}
-
 json.dump(S, open(os.path.join(D, 'summary.json'), 'w'), indent=1)
 
 # seed-level CSV
 with open(os.path.join(D, 'seed_level.csv'), 'w', newline='') as f:
-    w = csv.writer(f)
+    w = csv.writer(f, lineterminator='\n')
     w.writerow(['seed', 'model'] + MET)
     for r in R:
         for m in ['NDT', 'RATE', 'BAYES', 'NDT_nodelay', 'NDT_norec']:
             w.writerow([r['seed'], m] + [r[m][k] for k in MET])
 
 
-def show(d, ind=0):
-    for k, v in d.items():
-        if k == 'reliability':
-            continue
-        if isinstance(v, dict):
-            print(' ' * ind + str(k)); show(v, ind + 2)
-        else:
-            print(' ' * ind + f'{k}: {v}')
+# ---------------- manuscript tables (values as printed in the manuscript)
+f3 = lambda v: f'{v[0]:.3f} ± {v[1]:.3f}'
+f2 = lambda v: f'{v[0]:.2f} ± {v[1]:.2f}'
+e = lambda x: f'{x:.3g}'
+T7 = S['table7']; ops = S['operations']['counts_test']; opf = S['operations']['counts_full']
+print(f'Table 7 (held-out window; mean ± 95% CI over {n} seeds)')
+print(f"{'':38s}{'NDT':>18s}{'Rate':>18s}{'Bayes':>18s}")
+for lab, k, f in [('Belief RMSE', 'rmse_full', f3), ('Negative log-likelihood', 'logloss', f3),
+                  ('Brier score', 'brier', f3), ('Decision accuracy', 'accuracy', f3),
+                  ('Adaptation time (s)', 't_adapt', f2)]:
+    print(f'{lab:38s}' + ''.join(f'{f(T7[m][k]):>18s}' for m in ['NDT', 'RATE', 'BAYES']))
+print(f"{'Synaptic events (full trial)':38s}{e(opf['NDT_synaptic_events_meanfield'][0]):>18s}")
+print(f"{'Rate-model MACs (full trial)':38s}{'':>18s}{e(opf['RATE_mac_recurrent_plus_input'][0]):>18s}")
+print(f"{'Executed primitive ops (held-out)':38s}{e(ops['NDT_total_executed'][0]):>18s}{e(ops['RATE_total'][0]):>18s}")
+print(f"{'Projected event-driven (held-out)':38s}{e(ops['NDT_total_event_driven_projection'][0]):>18s}")
+t = S['tests_ndt_vs_rate']
+print(f"Paired tests NDT vs Rate: RMSE p={t['rmse_full']['p']:.2g}, adaptation p={t['t_adapt']['p']:.2f}")
 
+T8 = S['table8']
+print('\nTable 8 (mechanism ablations; event counts over the full 60 s trial)')
+print(f"{'':38s}{'Full NDT':>18s}{'No delays (1 ms)':>18s}{'No recurrence':>18s}")
+for lab, k, f in [('Belief RMSE', 'rmse_full', f3), ('Brier score', 'brier', f3),
+                  ('Adaptation time (s)', 't_adapt', f2)]:
+    print(f'{lab:38s}' + ''.join(f'{f(T8[m][k]):>18s}' for m in ['NDT', 'NDT_nodelay', 'NDT_norec']))
+for lab, k in [('Spikes per trial', 'spikes_full'), ('Synaptic events per trial', 'syn_full')]:
+    print(f'{lab:38s}' + ''.join(f'{e(T8[m][k][0]):>18s}' for m in ['NDT', 'NDT_nodelay', 'NDT_norec']))
+ta = S['tests_ablation']
+print(f"Paired RMSE tests vs full NDT: no delays p={ta['NDT_nodelay_rmse_full']['p']:.2g}, "
+      f"no recurrence p={ta['NDT_norec_rmse_full']['p']:.2g}")
 
-show(S)
+print('\nTable 9 (belief RMSE under event loss)')
+for pd in drops:
+    print(f'{pd:<38}' + ''.join(f"{f3(S['table9'][m][str(pd)]):>18s}" for m in ['NDT', 'RATE', 'BAYES']))
+print(f"{'Absolute RMSE increase (0 to 0.4)':38s}" + ''.join(f"{'+%.3f' % S['robust_abs_increase'][m][0]:>18s}"
+                                                         for m in ['NDT', 'RATE', 'BAYES']))
